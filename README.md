@@ -1,4 +1,5 @@
-<img width="1300" height="860" alt="image" src="https://github.com/user-attachments/assets/ea5ccdf8-1b92-424f-9f20-2fb2d26b43a2" />
+<img width="1800" height="941" alt="image" src="https://github.com/user-attachments/assets/7f2ff666-d5e2-46ad-81ab-cb1c1e5473d5" />
+
 
 
 # Super_Maks
