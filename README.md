@@ -1,6 +1,6 @@
 # Maks
 
-A fully agentic, voice-first JARVIS clone — wake-word activated,
+A fully agentic Real-Time Conversational Agent — wake-word activated,
 **[LangGraph](https://langchain-ai.github.io/langgraph/)-orchestrated**, and
 built to actually survive a restart.
 
