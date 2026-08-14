@@ -1,0 +1,79 @@
+# --- Core agent / orchestration ---
+# No langgraph-supervisor here on purpose: its supervisor node is itself a
+# full create_react_agent ReAct loop, so it re-invokes the LLM a 3rd/4th time
+# after every handoff (verified by reading its source). No langgraph-swarm
+# either — maks/graph/supervisor.py's router delegates via
+# Command(graph=Command.PARENT, goto=<specialist>), the same handoff
+# primitive swarm's own tools use internally, without the dependency.
+# Specialists are wired as real graph nodes (not called from inside a tool's
+# coroutine) specifically so LangGraph Studio can render each one's own
+# internal nodes as an expandable subgraph. maks/graph/router.py is a small
+# embedding-based fast-path router in front of the supervisor (all-minilm via
+# Ollama): confident single-intent requests skip straight to a specialist
+# with no LLM call at all; anything ambiguous or compound falls back to the
+# supervisor below.
+langgraph>=0.2.60
+langchain-core>=0.3.29
+langchain-groq>=0.2.0
+# Still needed for OllamaEmbeddings (the router's embedding model) even
+# though chat now runs on Groq.
+langchain-ollama>=0.2.2
+
+# --- MCP (Model Context Protocol): every integration below is a real MCP
+# server (maks/mcp_servers/*.py, mac_companion/mac_agent.py); these are the
+# server SDK + the LangGraph-side client that pulls their tools in.
+# Pinned deliberately: langchain-mcp-adapters 0.3.2 declares mcp<2.0.0, so a
+# loose ">=2.0.0" on mcp resolves to an unsupported combo (verified). ---
+mcp[cli]==1.29.0
+langchain-mcp-adapters==0.3.2
+
+# --- Web dashboard / server ---
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+websockets>=14.1
+python-multipart>=0.0.20
+
+# --- Config ---
+python-dotenv>=1.0.1
+pydantic>=2.10.4
+pydantic-settings>=2.7.1
+
+# --- Dev tooling ---
+# `langgraph dev` (see langgraph.json) spins up a local LangGraph Studio +
+# API server so you can drive the supervisor graph directly -- no voice
+# pipeline, no dashboard -- with full LangSmith tracing if it's configured.
+# [inmem] pulls in the in-memory server variant, no Postgres/Redis needed.
+langgraph-cli[inmem]>=0.2.0
+
+# --- Voice: wake word + STT + audio I/O + global hotkey ---
+vosk>=0.3.45
+faster-whisper>=1.1.0
+sounddevice>=0.5.1
+numpy>=1.26.4
+# System-wide "hold Ctrl for 2s" listen trigger, used after the first
+# wake-phrase activation each run (see maks/voice/hotkey.py). Chosen over
+# the `keyboard` package: more actively maintained, doesn't need admin
+# rights for global hooks on Windows.
+pynput>=1.7.7
+# webrtcvad (not webrtcvad-wheels) is broken on modern Python/Windows -- it
+# imports pkg_resources internally, which venvs no longer bundle by default
+# (verified: fails with ModuleNotFoundError on install). webrtcvad-wheels is
+# the maintained fork with prebuilt wheels; same `import webrtcvad` API.
+webrtcvad-wheels>=2.0.11.post1
+rapidfuzz>=3.11.0
+soundfile>=0.13.0
+
+# --- Tool integrations (used by maks/mcp_servers/api_connectors.py) ---
+ddgs>=9.0.0
+beautifulsoup4>=4.12.3
+google-api-python-client>=2.158.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.1
+notion-client>=2.3.0
+httpx>=0.28.1
+requests>=2.32.3
+
+# --- Dashboard telemetry (maks/tools/system_stats.py) ---
+# Same package/pattern mac_companion/actions/system_info.py already uses for
+# the Mac's own stats -- this is for the local (Windows) box Maks runs on.
+psutil>=6.1.1

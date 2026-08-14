@@ -1,0 +1,559 @@
+:root {
+  --bg: #05070a;
+  --panel: rgba(18, 21, 28, 0.82);
+  --border: #22262f;
+  --text: #e7e9ee;
+  --muted: #8891a3;
+  --accent: #6ee7ff;
+  --good: #57e389;
+  --warn: #ffcc66;
+  --speak: #ff9ecb;
+  --bad: #ff6b6b;
+  --ring-color: #3a4250;
+  --ring-glow: rgba(110, 231, 255, 0.15);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
+
+.hud {
+  position: relative;
+  height: 100vh;
+  width: 100vw;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(110, 231, 255, 0.05), transparent 55%),
+    var(--bg);
+  /* Iron Man lab effect: dark/dim until the wake phrase is heard, then
+     powers up. transition on filter is what gives the "lights coming on"
+     feel when data-state flips from idle to wake. Panels/telemetry stay
+     visible while dim -- just dimmed along with everything else, not
+     hidden -- matching "everything's there, just powered down". */
+  filter: brightness(1) saturate(1);
+  transition: filter 0.8s ease;
+}
+
+/* Waiting for the first-ever wake phrase this run: standby glow. */
+[data-state="idle"] {
+  filter: brightness(0.28) saturate(0.35);
+}
+
+/* The instant the wake phrase (or the hotkey) lands, snap back to full
+   brightness fast -- power-up should feel quick, not gradual. */
+[data-state="wake"] {
+  transition: filter 0.15s ease;
+  filter: brightness(1) saturate(1);
+}
+
+/* Lit and staying lit, waiting on the "hold Ctrl" hotkey instead of the
+   wake phrase (every activation after the first) -- full brightness, calm. */
+[data-state="ready"] {
+  filter: brightness(1) saturate(1);
+}
+
+/* ---------- Status module ---------- */
+
+.status-module {
+  position: absolute;
+  top: 20px;
+  left: 24px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  z-index: 2;
+}
+
+.brand-name {
+  font-weight: 700;
+  letter-spacing: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--bad);
+}
+
+.dot.ok { background: var(--good); }
+
+/* ---------- Info strip (top-center: clock / uptime / battery / weather) --- */
+
+.info-strip {
+  position: absolute;
+  top: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(110, 231, 255, 0.35);
+  z-index: 2;
+}
+
+.info-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.info-divider {
+  color: var(--ring-color);
+}
+
+.battery-icon {
+  color: var(--accent);
+}
+
+/* ---------- Icon buttons (shared) ---------- */
+
+.icon-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.icon-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(110, 231, 255, 0.08);
+}
+
+.settings-toggle {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  z-index: 2;
+}
+
+/* ---------- Telemetry columns (CPU/RAM left, DISK/NETWORK right) --------- */
+
+.tele-column {
+  position: absolute;
+  top: 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  z-index: 1;
+  width: 152px;
+}
+
+.tele-left { left: 24px; }
+.tele-right { right: 24px; align-items: flex-end; }
+.tele-right .tele-panel { width: 100%; }
+
+.tele-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  backdrop-filter: blur(6px);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.tele-label {
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.tele-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1.1;
+}
+
+.tele-unit {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 2px;
+}
+
+.tele-sub {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.tele-bar {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.tele-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), #2fb8d6);
+  box-shadow: 0 0 6px rgba(110, 231, 255, 0.6);
+  transition: width 0.5s ease;
+}
+
+.tele-net-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.tele-net-row + .tele-net-row { margin-top: 3px; }
+
+.tele-net-arrow {
+  font-size: 10px;
+}
+
+.tele-net-arrow.up { color: var(--warn); }
+.tele-net-arrow.down { color: var(--good); }
+
+/* ---------- Reactor module (centerpiece) ---------- */
+
+.ring-module {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  pointer-events: none;
+}
+
+.reactor-wrap {
+  position: relative;
+  width: 300px;
+  height: 300px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  box-shadow: 0 0 60px 12px var(--ring-glow);
+  transition: box-shadow 0.4s ease;
+}
+
+.reactor-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.r-ring {
+  fill: none;
+  stroke: var(--ring-color);
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: stroke 0.4s ease, opacity 0.4s ease;
+}
+
+.r-outer { stroke-width: 2; stroke-dasharray: 3 11; animation: spin 100s linear infinite; }
+.r-outer-ticks { stroke-width: 1; stroke-dasharray: 42 16; opacity: 0.45; animation: spin-reverse 75s linear infinite; }
+.r-mid { stroke-width: 2; stroke-dasharray: 64 9; animation: spin-reverse 55s linear infinite; }
+.r-mid-dash { stroke-width: 1; stroke-dasharray: 4 5; opacity: 0.55; animation: spin 32s linear infinite; }
+.r-inner { stroke-width: 1.5; stroke-dasharray: 490 38; opacity: 0.7; animation: spin 130s linear infinite; }
+
+/* thinking: everything spins up noticeably faster, like it's working hard */
+[data-state="thinking"] .r-ring { animation-duration: 5s; }
+
+.reactor-core {
+  position: relative;
+  width: 66px;
+  height: 66px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, var(--accent), #0a2b30 75%);
+  box-shadow: 0 0 34px 8px var(--ring-glow);
+  transition: box-shadow 0.4s ease, background 0.4s ease;
+}
+
+/* idle: slow, quiet breathing, dimmed by the .hud-level filter already */
+[data-state="idle"] .reactor-core { animation: breathe 4.5s ease-in-out infinite; }
+
+/* ready: lit, calm -- "on and listening for the hotkey", not urgent */
+[data-state="ready"] .reactor-core { animation: breathe 3.2s ease-in-out infinite; }
+
+/* wake / listening: green, expanding pulses */
+[data-state="wake"], [data-state="listening"] {
+  --ring-color: #2f6e49;
+  --ring-glow: rgba(87, 227, 137, 0.45);
+}
+[data-state="wake"] .reactor-core, [data-state="listening"] .reactor-core {
+  background: radial-gradient(circle at 35% 30%, var(--good), #0a3020 75%);
+  animation: breathe 1.2s ease-in-out infinite;
+}
+
+/* thinking: amber */
+[data-state="thinking"] {
+  --ring-color: #7a5f1a;
+  --ring-glow: rgba(255, 204, 102, 0.45);
+}
+[data-state="thinking"] .reactor-core {
+  background: radial-gradient(circle at 35% 30%, var(--warn), #3a2c0a 75%);
+  animation: breathe 0.9s ease-in-out infinite;
+}
+
+/* speaking: pink, rhythmic pulse */
+[data-state="speaking"] {
+  --ring-color: #6e2f52;
+  --ring-glow: rgba(255, 158, 203, 0.5);
+}
+[data-state="speaking"] .reactor-core {
+  background: radial-gradient(circle at 35% 30%, var(--speak), #3a0a24 75%);
+  animation: breathe 0.5s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.08); opacity: 1; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes spin-reverse {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
+}
+
+.state-readout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.state-label {
+  text-transform: uppercase;
+  letter-spacing: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.agent-label {
+  font-size: 12px;
+  color: var(--accent);
+  padding: 3px 12px;
+  border: 1px solid rgba(110, 231, 255, 0.3);
+  border-radius: 999px;
+  text-transform: capitalize;
+}
+
+/* ---------- Transcript module (bottom-right, current exchange only) ---------- */
+
+.transcript-module {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  max-width: min(38vw, 420px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  backdrop-filter: blur(6px);
+  animation: fade-in 0.2s ease;
+  z-index: 2;
+}
+
+.transcript-line {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.transcript-line.user {
+  color: var(--muted);
+}
+
+.transcript-line.user::before {
+  content: "you  ";
+  color: var(--accent);
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.transcript-line.maks::before {
+  content: "maks  ";
+  color: var(--speak);
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.transcript-line:empty { display: none; }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------- Input module (bottom-left, collapsed by default) ---------- */
+
+.input-module {
+  position: absolute;
+  left: 24px;
+  bottom: 24px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 2;
+}
+
+.chat-form input {
+  width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  backdrop-filter: blur(6px);
+}
+
+.chat-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ---------- Settings slide-out (persona editor) ---------- */
+
+.settings-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 5;
+}
+
+.settings-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(420px, 90vw);
+  background: #0d1017;
+  border-left: 1px solid var(--border);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transform: translateX(100%);
+  transition: transform 0.25s ease;
+  z-index: 6;
+}
+
+.settings-panel.open {
+  transform: translateX(0);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.settings-header .icon-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+.hint code {
+  color: var(--accent);
+}
+
+#persona-text {
+  flex: 1;
+  resize: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 12px;
+  border-radius: 10px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#persona-text:focus { outline: none; border-color: var(--accent); }
+
+.persona-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#persona-save {
+  background: var(--accent);
+  color: #04202a;
+  border: none;
+  padding: 8px 18px;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#persona-status {
+  color: var(--good);
+  font-size: 12px;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 900px) {
+  .tele-column { display: none; }
+  .info-strip { font-size: 10px; gap: 6px; }
+}
+
+@media (max-width: 640px) {
+  .reactor-wrap { width: 220px; height: 220px; }
+  .reactor-core { width: 48px; height: 48px; }
+  .transcript-module { max-width: 80vw; left: 16px; right: 16px; }
+  .chat-form input { width: 60vw; }
+}

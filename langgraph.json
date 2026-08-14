@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "supervisor": "./maks/graph/supervisor.py:make_graph"
+  },
+  "env": ".env"
+}

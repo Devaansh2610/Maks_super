@@ -1,0 +1,28 @@
+# [Ubuntu/Linux only] systemd --user unit — runs Maks in your own login
+# session (needed so it can reach your PulseAudio/ALSA session for mic +
+# speaker access). On Windows, use scripts/install_task.ps1 instead.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/maks.service ~/.config/systemd/user/maks.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maks.service
+#   loginctl enable-linger "$USER"   # so it also starts before you log in
+#
+# Assumes the project lives at ~/Maks — edit the paths below if not.
+# Logs: journalctl --user -u maks.service -f
+
+[Unit]
+Description=Maks personal voice assistant
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Maks
+ExecStart=%h/Maks/venv/bin/python -m maks.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

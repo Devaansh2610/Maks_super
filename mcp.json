@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "connectors": {
+      "command": "venv/Scripts/python.exe",
+      "args": ["-m", "maks.mcp_servers.api_connectors"],
+      "cwd": "."
+    },
+    "mac": {
+      "type": "http",
+      "url": "http://<mac-lan-ip>:8765/mcp",
+      "headers": { "X-Maks-Token": "<your MAC_COMPANION_TOKEN>" }
+    }
+  }
+}

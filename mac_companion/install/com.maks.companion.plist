@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template — install.sh fills in __VENV_PYTHON__ and __WORKDIR__ and copies
+  the result to ~/Library/LaunchAgents/com.maks.companion.plist. Don't load
+  this file directly; run install.sh instead.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.maks.companion</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VENV_PYTHON__</string>
+    <string>__WORKDIR__/mac_agent.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__WORKDIR__/companion.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__WORKDIR__/companion.error.log</string>
+</dict>
+</plist>

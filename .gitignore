@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+venv/
+.env
+secrets/
+models/
+mac_companion/venv/
+mac_companion/.env
+mac_companion/*.log
+# langgraph dev's local runtime cache (checkpoints/store pickles) -- not
+# source, machine-specific, regenerated on every run.
+.langgraph_api/
