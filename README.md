@@ -1,4 +1,7 @@
-# Maks
+<img width="1300" height="860" alt="image" src="https://github.com/user-attachments/assets/ea5ccdf8-1b92-424f-9f20-2fb2d26b43a2" />
+
+
+# Super_Maks
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)
