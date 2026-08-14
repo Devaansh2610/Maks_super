@@ -19,6 +19,7 @@ import datetime as dt
 import json
 import shutil
 import subprocess
+import sys
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -570,29 +571,32 @@ def _run_claude(task: str, project_dir: str) -> str:
     if settings.claude_permission_mode:
         command += ["--permission-mode", settings.claude_permission_mode]
 
+    # Without stdin=DEVNULL, this subprocess inherits this process's console
+    # -- Claude Code then detects a real TTY on stdin and enables
+    # interactive terminal features (mouse tracking) on it despite
+    # -p/--print, then blocks waiting for keyboard input that will never
+    # come, on whatever console that happened to be (observed in testing on
+    # Windows: it can be an unrelated ancestor console, not even one this
+    # app opened). stdin=DEVNULL denies it any input stream to treat as a
+    # TTY -- needed on every platform. CREATE_NO_WINDOW is belt-and-suspenders
+    # on top of that (stops it from creating/attaching to a console at all)
+    # but is a Windows-only subprocess flag -- referencing it unconditionally
+    # would crash this whole tool call on Linux, where it doesn't exist.
+    popen_kwargs: dict = {
+        "cwd": str(target_dir) if target_dir.exists() else None,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "stdin": subprocess.DEVNULL,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(target_dir) if target_dir.exists() else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            # Without these two, this subprocess inherits this process's
-            # console on Windows -- Claude Code then detects a real TTY on
-            # stdin and enables interactive terminal features (mouse
-            # tracking) on it despite -p/--print, then blocks waiting for
-            # keyboard input that will never come, on whatever console that
-            # happened to be (observed in testing: it can be an unrelated
-            # ancestor console, not even one this app opened). stdin=DEVNULL
-            # denies it any input stream to treat as a TTY; CREATE_NO_WINDOW
-            # additionally stops it from creating or attaching to a console
-            # at all. Together these make -p mode actually headless.
-            stdin=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
+        process = subprocess.Popen(command, **popen_kwargs)
     except FileNotFoundError:
         return (
             f"Couldn't find the '{settings.claude_cli_bin}' CLI on this machine. "

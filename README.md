@@ -1,5 +1,18 @@
 # Maks
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)
+![Design](https://img.shields.io/badge/design-local--first-brightgreen.svg)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
+
+![Python](https://img.shields.io/badge/python-3776AB.svg?logo=python&logoColor=white)
+![JavaScript](https://img.shields.io/badge/javascript-F7DF1E.svg?logo=javascript&logoColor=black)
+![HTML5](https://img.shields.io/badge/html5-E34F26.svg?logo=html5&logoColor=white)
+![CSS3](https://img.shields.io/badge/css3-1572B6.svg?logo=css3&logoColor=white)
+![Bash](https://img.shields.io/badge/bash-4EAA25.svg?logo=gnubash&logoColor=white)
+![PowerShell](https://img.shields.io/badge/powershell-5391FE.svg?logo=powershell&logoColor=white)
+
 A fully agentic Real-Time Conversational Agent — wake-word activated,
 **[LangGraph](https://langchain-ai.github.io/langgraph/)-orchestrated**, and
 built to actually survive a restart.
