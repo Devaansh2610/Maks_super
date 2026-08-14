@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     embedding_model: str = "all-minilm"
     router_similarity_threshold: float = 0.72
 
+    # Context budgets (token-aware trimming — see maks/graph/supervisor.py's
+    # _trim_history and each specialist's own pre_model_hook). Sized against
+    # Groq's free-tier ~8000 tok/min ceiling, split across whichever of the
+    # router's own call and one specialist call happen in the same turn.
+    router_max_context_tokens: int = 3000
+    chit_chat_max_context_tokens: int = 1500
+    office_max_context_tokens: int = 2500
+    coder_max_context_tokens: int = 2500
+
     # Wake word / voice
     wake_phrase: str = "daddy's home"
     wake_match_threshold: int = 78
@@ -83,6 +92,13 @@ class Settings(BaseSettings):
     # Claude handoff
     claude_default_project_dir: str = "~/projects"
     claude_cli_bin: str = "claude"
+    # run_claude_code (maks/mcp_servers/api_connectors.py) runs Claude Code
+    # headlessly, so there's no user watching to approve a tool call that
+    # needs permission -- it'll hang instead of prompting. Set this (e.g.
+    # "acceptEdits", "bypassPermissions") to opt into a specific permission
+    # mode for that headless run; left empty (the CLI's own interactive
+    # default) rather than silently choosing a permissive one.
+    claude_permission_mode: str = ""
 
     # Fish Audio (cloud TTS)
     fish_audio_api_key: str = ""

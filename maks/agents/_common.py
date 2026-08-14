@@ -11,7 +11,7 @@ import asyncio
 from typing import Callable
 
 from groq import APIError as GroqAPIError
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
 
 from maks.events import bus
 from maks.settings import settings
@@ -84,10 +84,41 @@ def dynamic_prompt(role_instructions: str) -> Callable[[dict], list]:
     return _prompt
 
 
-async def invoke_specialist(agent, task: str) -> tuple[str, bool]:
-    """Runs `agent` on a single isolated task (no shared conversation
-    history — the specialist only ever sees this one HumanMessage) and
-    returns (answer_text, needs_handoff).
+def make_trim_hook(max_tokens: int) -> Callable[[dict], dict]:
+    """pre_model_hook factory for a specialist's own checkpointed history —
+    same trim_messages pattern maks/graph/supervisor.py's router uses, just
+    with a caller-chosen budget. Only matters once a specialist has a
+    checkpointer + stable thread_id (see maks/graph/state.py's
+    SPECIALIST_THREAD_IDS) and can actually accumulate turns; harmless
+    no-op otherwise (a short history is never trimmed).
+    """
+
+    def _trim(state: dict) -> dict:
+        trimmed = trim_messages(
+            state["messages"],
+            max_tokens=max_tokens,
+            strategy="last",
+            token_counter="approximate",
+            start_on="human",
+            include_system=True,
+        )
+        return {"llm_input_messages": trimmed}
+
+    return _trim
+
+
+async def invoke_specialist(agent, task: str, thread_id: str | None = None) -> tuple[str, bool]:
+    """Runs `agent` on a single task (one new HumanMessage) and returns
+    (answer_text, needs_handoff).
+
+    When `thread_id` is None (the default), this is fully isolated — the
+    specialist only ever sees this one HumanMessage, no shared conversation
+    history, exactly as before sticky sessions existed. When given a
+    thread_id (see maks/graph/state.py's SPECIALIST_THREAD_IDS), the
+    specialist's own checkpointer (threaded into build_*_agent — see
+    maks/graph/supervisor.py's _assemble_graph) resumes that thread's prior
+    turns automatically; this call still only appends the new HumanMessage,
+    the checkpointer supplies everything before it.
 
     `agent` just needs to expose `.ainvoke({"messages": [...]}) ->
     {"messages": [...]}` — true for both a create_react_agent-built
@@ -106,10 +137,12 @@ async def invoke_specialist(agent, task: str) -> tuple[str, bool]:
     was judged worse for now. Revisit if this turns out to fire often enough
     for the duplicate-side-effect risk to matter in practice.
     """
+    config = {"configurable": {"thread_id": thread_id}} if thread_id else None
+
     last_exc: GroqAPIError | None = None
     for attempt in range(_MAX_SPECIALIST_ATTEMPTS):
         try:
-            result = await agent.ainvoke({"messages": [HumanMessage(content=task)]})
+            result = await agent.ainvoke({"messages": [HumanMessage(content=task)]}, config=config)
             break
         except GroqAPIError as exc:
             if _TRANSIENT_TOOL_CHOICE_MARKER not in str(exc).lower():

@@ -1,15 +1,92 @@
 # Maks
 
-A personal voice assistant. Say **"Daddy's home"** (JARVIS-style —
-configurable), it wakes up, greets you with live weather, then routes
-whatever you ask through an embedding fast-path router or a
-[LangGraph](https://langchain-ai.github.io/langgraph/) supervisor that either
-answers directly or delegates to a specialist — chat runs on **Groq**
-(`openai/gpt-oss-20b`, currently the fastest model on Groq by output
-tokens/sec, hosted and free), with **offline wake word + STT** (Vosk
-wake-word spotting, faster-whisper) and **Fish Audio** cloud TTS for replies,
-plus a minimal, voice-first, Jarvis-style dashboard that's dark until it
-hears you, then lights up.
+A fully agentic, voice-first JARVIS clone — wake-word activated,
+**[LangGraph](https://langchain-ai.github.io/langgraph/)-orchestrated**, and
+built to actually survive a restart.
+
+Under the hood: a **multi-agent LangGraph supervisor** with a
+self-correcting review loop (capped, so it can't loop itself into a
+rate-limit wall), backed by a **cosine-similarity embedding router** that
+skips the LLM entirely for confident requests, **durable SQLite-checkpointed
+memory** with per-agent **sticky sessions** (talk to the same specialist
+across turns — it actually remembers, even across a restart), a **dynamic
+`Send`-based worker graph** for parallel multi-step Mac control, and
+**hands-free Claude Code integration** that narrates its own progress live,
+straight from Claude's own structured event stream — no terminal-scraping
+hacks. Every tool call runs through real
+**[MCP](https://modelcontextprotocol.io) (Model Context Protocol) servers**,
+not hand-rolled function-calling glue. Chat runs on **Groq**
+(`openai/gpt-oss-20b`) for near-instant responses, voice is **fully
+offline** until it's time to speak (Vosk wake-word spotting + faster-whisper
+STT), and **Fish Audio** gives it a real voice — all wrapped in a minimal,
+Jarvis-style dashboard that's dark until it hears you, then lights up.
+
+**Problems this actually solves**, not just demos:
+- **Memory that survives a restart** — not just chat history, per-agent
+  sticky threads, via LangGraph's own checkpointer.
+- **Routing that costs (basically) nothing** — most requests never hit an
+  LLM at all.
+- **A supervisor that can't loop forever** — bounded self-correction instead
+  of an unbounded review cycle burning through a free-tier rate limit.
+- **Hands-free coding, actually narrated** — Claude Code's own event stream,
+  not a scraped terminal.
+
+## Architecture, visually
+
+```mermaid
+flowchart TD
+    START([START]) --> start_turn
+    start_turn["start_turn\n(resets delegation_count to 0)"] --> router_start
+
+    subgraph router["router (create_react_agent)"]
+        router_start([start]) --> router_pre["pre_model_hook\n(trim_messages, ROUTER_MAX_CONTEXT_TOKENS)"]
+        router_pre --> router_agent["agent\n(Groq gpt-oss-20b + weather_lookup\n+ 4x ask_&lt;specialist&gt; tools)"]
+        router_agent -.->|tool call: weather_lookup| router_tools["tools node"]
+        router_tools --> router_pre
+        router_agent -.->|no tool call: direct final reply| router_end([end])
+    end
+
+    router_agent -.->|ask_chit_chat_agent| chit_chat_agent
+    router_agent -.->|ask_office_agent| office_agent
+    router_agent -.->|ask_mac_control_agent| mac_control_agent
+    router_agent -.->|ask_coder_agent| coder_agent
+    router_end --> END([END])
+
+    subgraph chit_chat_agent["chit_chat_agent (create_react_agent)"]
+        cc_pre["pre_model_hook\n(trim, CHIT_CHAT_MAX_CONTEXT_TOKENS)"] --> cc_agent["agent\n(no tools — just the LLM,\nJARVIS-style personality)"]
+    end
+
+    subgraph office_agent["office_agent (create_react_agent)"]
+        of_pre["pre_model_hook\n(trim, OFFICE_MAX_CONTEXT_TOKENS)"] --> of_agent["agent\n(web/Gmail/Calendar/Notion tools loop)"]
+    end
+
+    subgraph coder_agent["coder_agent (create_react_agent)"]
+        co_pre["pre_model_hook\n(trim, CODER_MAX_CONTEXT_TOKENS)"] --> co_agent["agent"]
+        co_agent --> co_post["post_model_hook\n(announces handoff the instant\nrun_claude_code is about to be called)"]
+    end
+
+    subgraph mac_control_agent["mac_control_agent (hand-built StateGraph)"]
+        mac_plan["plan_subtasks\n(LLM splits request into 1+ atomic subtasks)"]
+        mac_plan -.->|Send, one per subtask, parallel| mac_worker["mac_worker\n(create_react_agent, Mac companion tools)"]
+        mac_worker --> mac_agg["aggregate\n(1 result: pass through.\n2+: LLM synthesizes one reply)"]
+    end
+
+    cc_agent --> after_specialist
+    of_agent --> after_specialist
+    co_post --> after_specialist
+    mac_agg --> after_specialist
+
+    after_specialist["after_specialist\n(wraps result as a labeled\n'reported back — review' note)"]
+    after_specialist -.->|delegation_count < 2| router_start
+    after_specialist -.->|delegation_count >= 2| finalize
+    finalize["finalize\n(relays last specialist's answer\nverbatim — no extra LLM call)"] --> END
+```
+
+Generated straight from the compiled graph
+(`graph.get_graph(xray=True).draw_mermaid()`), not hand-drawn — see
+[`architecture.md`](architecture.md) for the full system diagram (voice
+pipeline → routing → specialists → MCP servers → persistence) plus a
+technology-by-technology breakdown of how everything actually works.
 
 Every non-Mac integration is a real **[MCP](https://modelcontextprotocol.io)
 server** — search/weather, Gmail+Calendar, Notion, messaging stubs, and the
@@ -572,16 +649,62 @@ identically — just swap PowerShell commands for their bash equivalents (e.g.
   `mac_control_agent`'s tools. Same idea for Google/Notion credentials
   configured after Maks has already started — those are read lazily on
   first real use, not at startup, so no restart needed for those two.
-- The supervisor (`maks/graph/supervisor.py`) caps how much conversation
-  history is fed into its own model call (`MAX_HISTORY_MESSAGES`, default
-  12) — very long-running sessions will gradually lose the earliest context,
-  a deliberate speed/memory trade-off, not a bug. Delegated specialists
-  don't have this problem at all — they only ever see the isolated task
-  they were given.
-- The embedding fast-path router (`maks/graph/router.py`) bypasses the
-  supervisor's checkpointer for whichever turns it handles, so those turns
-  aren't part of the conversation history a *later*, supervisor-routed turn
-  can see — a deliberate simplicity trade-off (specialists are already
-  stateless/isolated either way), not a bug. If this ever matters in
-  practice, raise `ROUTER_SIMILARITY_THRESHOLD` to fast-path less, or lower
-  it to fast-path more.
+- Conversation history is durable now: `maks/graph/supervisor.py` backs the
+  real app with a single `AsyncSqliteSaver` (`maks_memory.sqlite`, gitignored
+  — created on first run), so both the router's own conversation and each
+  sticky specialist's thread (see below) survive a restart of
+  `python -m maks.main`. `langgraph dev`/Studio still uses a fresh in-memory
+  `MemorySaver` per run — durability doesn't matter for that testing tool.
+- The supervisor caps how much conversation history is fed into its own
+  model call via token-aware trimming (`ROUTER_MAX_CONTEXT_TOKENS`, default
+  3000) rather than a flat message count — very long-running sessions will
+  gradually lose the earliest context, a deliberate speed/memory trade-off,
+  not a bug.
+- The embedding fast-path router (`maks/graph/router.py`) is also the
+  "sticky session" mechanism: a confident single-intent match sends the
+  utterance straight to `chit_chat_agent`, `office_agent`, or `coder_agent`
+  addressed by that agent's own stable thread id (`SPECIALIST_THREAD_IDS` in
+  `maks/graph/state.py`), so a specialist you've talked to before actually
+  remembers earlier turns — via its *own* checkpointed thread and its own
+  token budget (`CHIT_CHAT_MAX_CONTEXT_TOKENS`, `OFFICE_MAX_CONTEXT_TOKENS`,
+  `CODER_MAX_CONTEXT_TOKENS`), not the router's. There's no explicit
+  "un-stick" step — the embedding router re-checks fresh every single turn,
+  so drifting to a different kind of request naturally falls through to the
+  full supervisor graph instead. `mac_control_agent` is deliberately
+  excluded from stickiness: its DynamicWorker graph
+  (`maks/graph/dynamic_worker.py`) accumulates per-request results via an
+  `operator.add` reducer meant to live only within one request's fan-out —
+  giving it a persistent thread would leak results across unrelated Mac
+  requests, so it stays fully isolated per call, same as before this
+  feature. Sticky/fast-routed turns still aren't part of the *router's* own
+  top-level conversation history — a deliberate simplicity trade-off, not a
+  bug. If any of this ever matters in practice, raise
+  `ROUTER_SIMILARITY_THRESHOLD` to fast-path (and stick) less, or lower it
+  to do so more.
+- Handing a coding task to `coder_agent` runs Claude Code headlessly
+  (`run_claude_code` in `maks/mcp_servers/api_connectors.py`, via `claude -p
+  ... --output-format stream-json`) and narrates it live: Maks speaks the
+  handoff the instant it decides to delegate, then speaks a short update
+  for each significant action Claude takes (editing a file, running a
+  command, searching the code, ...) as it happens, via a small localhost
+  bridge (`POST /internal/narrate` on the dashboard — the MCP server runs
+  in a separate process and can't reach the event bus/speaker directly).
+  Once Claude finishes, the reply is Claude's own real summary of what it
+  did, not just a completion marker. Trade-off: this is headless, so a tool
+  call that needs permission approval will hang with no one to prompt —
+  `CLAUDE_PERMISSION_MODE` opts into a specific permission mode (e.g.
+  `acceptEdits`) if you want fully hands-off automation; left unset by
+  default since that's a real trust decision. `coder_agent`'s own prompt
+  also tells it not to re-delegate the same request once it has a real
+  result — combined with the delegation cap below, this keeps a coding
+  turn from opening a second Claude Code run on its own.
+- A single turn caps how many times it can bounce specialist → router →
+  specialist before forcing a reply (`MAX_DELEGATIONS_PER_TURN`, currently
+  2, in `maks/graph/supervisor.py`) — otherwise the router's own "is this
+  good enough?" judgment call is the only thing standing between one
+  delegation and an unbounded chain of them, which combines badly with
+  Groq's tight free-tier rate limit (a re-delegation right as the limit is
+  hit can turn into the whole turn silently retrying with backoff for the
+  better part of a minute, which looks exactly like a hang). Past the cap,
+  the last specialist's own answer becomes the final reply directly, with
+  no extra model call.

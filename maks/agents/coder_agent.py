@@ -1,13 +1,17 @@
 """Coding tasks: always hand off to the Claude Code CLI, never write code itself.
 
-run_claude_code lives in a separate MCP server process (maks/mcp_servers/
-api_connectors.py), so it can't reach into this process's event bus/speaker
-to announce the handoff before the (possibly slow, up to 15 minutes) subprocess
-finishes. Instead, a post_model_hook here fires the moment the model decides
-to call that tool — right after the model responds, before the ToolNode
-actually executes it — so "handing this to Claude" is spoken and shown on the
-dashboard instantly, rather than leaving the user in silence until the whole
-handoff completes.
+run_claude_code (maks/mcp_servers/api_connectors.py) runs Claude Code
+headlessly and narrates each significant action live via the dashboard as it
+streams by (editing a file, running a command, ...), then returns Claude's
+own real summary of what it did — not just a completion marker. It lives in
+a separate MCP server process, so it can't reach into this process's event
+bus/speaker to announce the *handoff* itself (the live narration during the
+run instead goes through maks/server/app.py's /internal/narrate, a plain
+localhost HTTP bridge). Instead, a post_model_hook here fires the moment the
+model decides to call that tool — right after the model responds, before the
+ToolNode actually executes it — so "handing this to Claude" is spoken and
+shown on the dashboard instantly, rather than leaving the user in silence
+until the first narrated action arrives.
 """
 
 from __future__ import annotations
@@ -15,15 +19,23 @@ from __future__ import annotations
 from langchain_core.tools import BaseTool
 from langgraph.prebuilt import create_react_agent
 
-from maks.agents._common import HANDOFF_INSTRUCTION, announce_delegation, dynamic_prompt
+from maks.agents._common import HANDOFF_INSTRUCTION, announce_delegation, dynamic_prompt, make_trim_hook
 from maks.llm import get_llm
+from maks.settings import settings
 
 ROLE = (
     "The user asked for something code-related: writing, editing, debugging, "
     "reviewing, or explaining code in a real project. You never write code "
     "yourself — you always call run_claude_code with a clear task description "
-    "built from the user's request. Your final reply must clearly state you "
-    "handed this to Claude and briefly relay what it reported back."
+    "built from the user's request. That tool runs Claude Code itself and "
+    "narrates its progress live as it works (the user hears each significant "
+    "step as it happens, separately from you), then returns Claude's own "
+    "real summary of what it actually did. Your final reply should relay "
+    "that summary in your own words — a genuine account of what changed, not "
+    "a generic 'it's finished'. If Claude Code exited with an error instead, "
+    "say so plainly rather than pretending it succeeded. Once you've relayed "
+    "a real result, treat the task as done — don't call run_claude_code "
+    "again for the same request just to double-check or re-confirm it."
     + HANDOFF_INSTRUCTION.format(other_agents="chit_chat_agent, office_agent, or mac_control_agent")
 )
 
@@ -47,11 +59,13 @@ async def _announce_claude_handoff(state: dict) -> dict:
     return {}
 
 
-def build_coder_agent(tools: list[BaseTool]):
+def build_coder_agent(tools: list[BaseTool], checkpointer=None):
     return create_react_agent(
         model=get_llm(),
         tools=tools,
         prompt=dynamic_prompt(ROLE),
+        pre_model_hook=make_trim_hook(settings.coder_max_context_tokens),
         post_model_hook=_announce_claude_handoff,
+        checkpointer=checkpointer,
         name="coder_agent",
     )

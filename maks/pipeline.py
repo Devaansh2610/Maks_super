@@ -6,12 +6,19 @@ paths behave identically.
 Two routing paths, tried in order:
 1. Embedding fast path (maks/graph/router.py): a confident, single-intent
    utterance goes straight to the matching specialist — no LLM call at all
-   for the routing decision itself. Fast-pathed turns are NOT added to the
-   supervisor's checkpointed conversation history (specialists are already
-   stateless/isolated by design — see maks/agents/_common.py's
-   invoke_specialist — so this only affects whether a *later*
-   supervisor-routed turn can see that a fast-pathed turn happened; a
-   deliberate simplicity trade-off, not an oversight).
+   for the routing decision itself. This is also the "sticky" path: every
+   confident match calls invoke_specialist with that agent's stable
+   SPECIALIST_THREAD_IDS thread id (see maks/graph/state.py), so a
+   specialist that's been talked to before actually remembers it via its
+   own checkpointer (threaded in from build_supervisor_graph) — there's no
+   separate "stay with the same agent" mechanism; a cheap re-check of the
+   embedding router on every turn (see _active_agent below) is what decides
+   whether continuity applies, not a sticky flag that has to be explicitly
+   broken out of. Fast/sticky-routed turns are NOT added to the router's
+   own top-level checkpointed conversation (a deliberate, known trade-off —
+   see the module docstring in maks/graph/supervisor.py's plan notes): the
+   specialist's own persisted thread is what carries continuity for that
+   agent's conversation, not the router's.
 2. Full supervisor graph (maks/graph/supervisor.py): anything ambiguous or
    compound, so it can actually reason about routing and self-correct.
 
@@ -28,10 +35,18 @@ from langchain_core.messages import HumanMessage
 from maks.agents._common import invoke_specialist
 from maks.events import bus
 from maks.graph.router import route
-from maks.graph.state import DEFAULT_THREAD_ID
+from maks.graph.state import DEFAULT_THREAD_ID, SPECIALIST_THREAD_IDS
 
 _graph = None
 _specialists: dict[str, object] = {}
+
+# Best-effort record of which specialist last answered — not persisted
+# across restarts (each specialist's own checkpointed thread already is,
+# see SPECIALIST_THREAD_IDS, so continuity itself survives a restart; this
+# variable only affects dashboard/debugging visibility of "who's active"
+# and isn't currently read by any routing decision — route() re-checks the
+# embedding router fresh every turn rather than trusting a sticky flag).
+_active_agent: str | None = None
 
 
 async def get_graph():
@@ -70,6 +85,8 @@ async def handle_command(text: str) -> str:
     """Send `text` through the fast-path router (or, on a miss, the full
     supervisor graph), return Maks' final reply.
     """
+    global _active_agent
+
     text = text.strip()
     if not text:
         return ""
@@ -82,7 +99,9 @@ async def handle_command(text: str) -> str:
 
     decision = await route(text)
     if decision.agent is not None and decision.agent in _specialists:
-        reply, _needs_handoff = await invoke_specialist(_specialists[decision.agent], text)
+        thread_id = SPECIALIST_THREAD_IDS.get(decision.agent)
+        reply, _needs_handoff = await invoke_specialist(_specialists[decision.agent], text, thread_id=thread_id)
+        _active_agent = decision.agent
         bus.publish("reply", text=reply, agent=decision.agent)
         return reply
 
@@ -93,6 +112,7 @@ async def handle_command(text: str) -> str:
     messages = result.get("messages", [])
     reply = messages[-1].content if messages else "Sorry, I didn't get a response."
     agent_name = _extract_agent_name(messages)
+    _active_agent = agent_name
 
     bus.publish("reply", text=reply, agent=agent_name)
     return reply

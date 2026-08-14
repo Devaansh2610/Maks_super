@@ -21,16 +21,23 @@ conversation thread across agents, undoing the isolated-task-string design
 ...)` is the same handoff primitive swarm's own tools use internally,
 applied here directly without the dependency.
 
-Classic supervisor control flow, by deliberate choice: every specialist's
-result always routes back through the router (`after_specialist -> router`,
-unconditional) so the router reviews it before answering — one extra LLM
-call per delegation, in exchange for the router always getting a chance to
-catch a wrong/incomplete answer before it reaches the user, rather than
-specialists silently ending the turn themselves. A specialist's result comes
-back to the router labeled as a finding to review (see `_after_specialist`),
-not injected as if the router already said it — otherwise the model reading
-its own history back would get confused about why it's being asked to speak
-again immediately after an apparently-already-complete answer.
+Classic supervisor control flow, by deliberate choice: a specialist's result
+routes back through the router (`after_specialist -> router`) so the router
+reviews it before answering — one extra LLM call per delegation, in exchange
+for the router usually getting a chance to catch a wrong/incomplete answer
+before it reaches the user, rather than specialists silently ending the turn
+themselves. Bounded, not unconditional: `MAX_DELEGATIONS_PER_TURN` caps how
+many specialist calls one turn can rack up before `_finalize` forces a reply
+straight from the last specialist's own answer — otherwise the router's own
+"is this good enough?" judgment call is the only thing standing between one
+delegation and an unbounded chain of them, which in practice combined badly
+with Groq's free-tier rate limit (a re-delegation right as the limit was hit
+turned into the whole turn silently retrying with backoff for the better
+part of a minute). A specialist's result comes back to the router labeled as
+a finding to review (see `_after_specialist`), not injected as if the router
+already said it — otherwise the model reading its own history back would get
+confused about why it's being asked to speak again immediately after an
+apparently-already-complete answer.
 
 Each specialist still only ever sees its own isolated task string via
 `invoke_specialist` (maks/agents/_common.py) — nothing about routing through
@@ -41,11 +48,13 @@ instead of from inside a `StructuredTool`'s coroutine.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, ToolMessage, trim_messages
 from langchain_core.tools import BaseTool, InjectedToolCallId, StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph, add_messages
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command
@@ -56,10 +65,45 @@ from maks.agents.chit_chat_agent import build_chit_chat_agent
 from maks.agents.coder_agent import build_coder_agent
 from maks.agents.office_agent import build_office_agent
 from maks.graph.dynamic_worker import build_mac_dynamic_worker_graph
+from maks.graph.state import SPECIALIST_THREAD_IDS
 from maks.llm import get_llm
+from maks.settings import PROJECT_ROOT, settings
 
-MAX_HISTORY_MESSAGES = 12
 _SPECIALIST_NAMES = ("chit_chat_agent", "office_agent", "coder_agent", "mac_control_agent")
+
+# Caps how many times a single turn can bounce specialist -> router -> a
+# (possibly different) specialist before the graph forces a final answer.
+# Without this, the router's own judgment call ("is this finding good
+# enough?") is the only thing standing between one delegation and an
+# unbounded chain of them — observed in practice: the router re-delegated a
+# perfectly reasonable office_agent answer because it wasn't phrased exactly
+# like the request, and the second specialist call queued up right as the
+# free-tier Groq rate limit was hit, so the whole turn sat retrying with
+# exponential backoff for the better part of a minute — indistinguishable
+# from a hang. 2 preserves the one-self-correction value of "always return
+# to router" (see the module docstring) while guaranteeing every turn
+# terminates in a bounded number of specialist calls.
+MAX_DELEGATIONS_PER_TURN = 2
+
+# Opened once, lazily, and kept open for the process's life — same lifecycle
+# pattern maks/mcp_client.py uses for its persistent MCP sessions. Only
+# build_supervisor_graph() (the real app's entry point) touches this;
+# make_graph() (langgraph dev/Studio) stays on a fresh in-memory MemorySaver
+# every call, on purpose — see make_graph()'s docstring.
+_checkpointer_stack: contextlib.AsyncExitStack | None = None
+_checkpointer: AsyncSqliteSaver | None = None
+
+
+async def _get_checkpointer() -> AsyncSqliteSaver:
+    global _checkpointer_stack, _checkpointer
+    if _checkpointer is None:
+        _checkpointer_stack = contextlib.AsyncExitStack()
+        _checkpointer = await _checkpointer_stack.enter_async_context(
+            AsyncSqliteSaver.from_conn_string(str(PROJECT_ROOT / "maks_memory.sqlite"))
+        )
+        await _checkpointer.setup()
+    return _checkpointer
+
 
 SUPERVISOR_ROLE = """You are Maks, routing every request to the right
 specialist. Use weather_lookup yourself for weather questions — that's the
@@ -83,7 +127,25 @@ your final reply, it's a draft for you to check. Read it, then either:
   your own words — never show the user the raw labeled note itself), or
 - delegate again — to the same specialist with a clearer task, or to a
   different one — if it's wrong, incomplete, or the specialist flagged it
-  couldn't fully complete the request on its own."""
+  couldn't fully complete the request on its own.
+
+A finding that substantively answers what the user asked is complete, even
+if it isn't phrased exactly like the request or doesn't cover every possible
+angle — relay it and stop. Only re-delegate for a real problem (wrong,
+empty, or an explicit NEEDS_HANDOFF flag), never just to get a more literal
+match. Re-delegation costs real time and a scarce rate-limit budget.
+
+Your final reply is spoken out loud, not read — if a finding is long,
+technical, or full of raw detail (a big list, a full code diff, a long
+email thread), summarize the key point(s) concisely instead of reading it
+all back; give the full detail only if the user actually asked for it.
+
+One exception to being transparent about delegation: for chit_chat_agent
+specifically, never mention that you routed or delegated anything ("handing
+this to chit-chat", "let me check with...") — just answer directly, as if
+you'd answered it yourself. For every other specialist (office_agent,
+mac_control_agent, coder_agent), it's fine, and expected, to be clear
+you're getting that specialist's help."""
 
 
 class SupervisorState(TypedDict):
@@ -92,6 +154,10 @@ class SupervisorState(TypedDict):
     result: str
     needs_handoff: bool
     agent_key: str
+    # Reset to 0 at the start of every turn (see _reset_turn), incremented by
+    # each specialist call within that turn (see _specialist_node) — read by
+    # _route_after_specialist to enforce MAX_DELEGATIONS_PER_TURN.
+    delegation_count: int
 
 
 def _delegate_tool(name: str, description: str, agent_key: str) -> StructuredTool:
@@ -113,12 +179,19 @@ def _delegate_tool(name: str, description: str, agent_key: str) -> StructuredToo
 def _trim_history(state: dict) -> dict:
     """pre_model_hook: caps how much history is fed to the router's own
     model call without touching the actual checkpointed state — a long
-    session shouldn't make every turn slower.
+    session shouldn't make every turn slower or blow the token budget.
+    Token-aware (not a flat message-count slice) so a handful of long
+    messages gets trimmed the same as many short ones.
     """
-    messages = state["messages"]
-    if len(messages) <= MAX_HISTORY_MESSAGES:
-        return {}
-    return {"llm_input_messages": messages[-MAX_HISTORY_MESSAGES:]}
+    trimmed = trim_messages(
+        state["messages"],
+        max_tokens=settings.router_max_context_tokens,
+        strategy="last",
+        token_counter="approximate",
+        start_on="human",
+        include_system=True,
+    )
+    return {"llm_input_messages": trimmed}
 
 
 def _specialist_node(agent, agent_key: str, announce_lead_in: str | None = None):
@@ -127,16 +200,42 @@ def _specialist_node(agent, agent_key: str, announce_lead_in: str | None = None)
     (already a clear, standalone instruction, per SUPERVISOR_ROLE) gets
     appended so the announcement says what's actually being done, not just
     that *something* is happening.
+
+    Passes SPECIALIST_THREAD_IDS.get(agent_key) to invoke_specialist — for
+    the three specialists that have one (everything but mac_control_agent),
+    this is what makes delegation "sticky": each router-mediated delegation
+    lands on that same persisted thread, so a specialist that's been asked
+    for something before actually remembers it, via its own checkpointer
+    (threaded in from _assemble_graph) rather than anything tracked here.
     """
+    thread_id = SPECIALIST_THREAD_IDS.get(agent_key)
 
     async def _run(state: SupervisorState) -> dict:
         task = state["task"]
         if announce_lead_in is not None:
             announce_delegation(agent_key, f"{announce_lead_in} — {task}")
-        answer, needs_handoff = await invoke_specialist(agent, task)
-        return {"result": answer, "needs_handoff": needs_handoff, "agent_key": agent_key}
+        answer, needs_handoff = await invoke_specialist(agent, task, thread_id=thread_id)
+        return {
+            "result": answer,
+            "needs_handoff": needs_handoff,
+            "agent_key": agent_key,
+            "delegation_count": state.get("delegation_count", 0) + 1,
+        }
 
     return _run
+
+
+def _reset_turn(state: SupervisorState) -> dict:
+    """Runs once, between START and the router, on every fresh top-level
+    invocation — the loop-back edge (after_specialist -> router) bypasses
+    this node entirely, so delegation_count keeps counting *within* one
+    turn's specialist/router back-and-forth but always starts clean on the
+    next one. Needed because SupervisorState is checkpointed per thread (see
+    build_supervisor_graph), so without this the counter would otherwise
+    carry over from the previous turn and could trip MAX_DELEGATIONS_PER_TURN
+    on a turn's very first delegation.
+    """
+    return {"delegation_count": 0}
 
 
 async def _after_specialist(state: SupervisorState) -> dict:
@@ -153,13 +252,38 @@ async def _after_specialist(state: SupervisorState) -> dict:
     return {"messages": [AIMessage(content=note)]}
 
 
-def _assemble_graph(tools_by_agent: dict[str, list[BaseTool]]):
+def _route_after_specialist(state: SupervisorState) -> str:
+    if state.get("delegation_count", 0) >= MAX_DELEGATIONS_PER_TURN:
+        return "finalize"
+    return "router"
+
+
+async def _finalize(state: SupervisorState) -> dict:
+    """Hard stop for MAX_DELEGATIONS_PER_TURN: skip the router's review LLM
+    call entirely and relay the last specialist's own answer verbatim as the
+    turn's final reply. No extra Groq call — deliberately, since this only
+    triggers once a turn has already spent its delegation budget and may
+    already be under rate-limit pressure (see MAX_DELEGATIONS_PER_TURN).
+    """
+    return {"messages": [AIMessage(content=state["result"])]}
+
+
+def _assemble_graph(tools_by_agent: dict[str, list[BaseTool]], checkpointer: AsyncSqliteSaver | None = None):
     """Shared by build_supervisor_graph() and make_graph() below — building
     the specialists/router/graph is identical either way; the only
     difference between the two callers is *how* tools_by_agent got
     populated (a persistent MCP session vs. a one-shot connection — see
     mcp_client.py's init() vs. load_tools_stateless() for why that split
-    exists).
+    exists) and whether a real, persistent `checkpointer` is given.
+
+    `checkpointer` is None from make_graph() (Studio testing keeps its own
+    fresh MemorySaver, see that function's docstring) and the shared
+    AsyncSqliteSaver from build_supervisor_graph() (the real app). It's
+    threaded into every specialist except mac_control_agent's DynamicWorker
+    (see maks/graph/state.py's SPECIALIST_THREAD_IDS docstring for why that
+    one stays excluded) as well as into the top-level graph itself, so a
+    specialist addressed via its stable thread id (SPECIALIST_THREAD_IDS)
+    actually persists across calls instead of starting fresh every time.
 
     Returns (graph, specialists): `specialists` is a name -> agent map of the
     exact same built agent instances the specialist nodes use, reused by
@@ -168,9 +292,9 @@ def _assemble_graph(tools_by_agent: dict[str, list[BaseTool]]):
     without building a second copy of it or paying for the router's own LLM
     call.
     """
-    chit_chat_agent = build_chit_chat_agent(tools_by_agent.get("chit_chat_agent", []))
-    office_agent = build_office_agent(tools_by_agent.get("office_agent", []))
-    coder_agent = build_coder_agent(tools_by_agent.get("coder_agent", []))
+    chit_chat_agent = build_chit_chat_agent(tools_by_agent.get("chit_chat_agent", []), checkpointer=checkpointer)
+    office_agent = build_office_agent(tools_by_agent.get("office_agent", []), checkpointer=checkpointer)
+    coder_agent = build_coder_agent(tools_by_agent.get("coder_agent", []), checkpointer=checkpointer)
     mac_dynamic_worker = build_mac_dynamic_worker_graph(tools_by_agent.get("mac_control_agent", []))
 
     specialists = {
@@ -247,33 +371,42 @@ def _assemble_graph(tools_by_agent: dict[str, list[BaseTool]]):
         _specialist_node(coder_agent, "coder_agent"),
     )
     builder.add_node("after_specialist", _after_specialist)
+    builder.add_node("start_turn", _reset_turn)
+    builder.add_node("finalize", _finalize)
 
-    builder.add_edge(START, "router")
+    builder.add_edge(START, "start_turn")
+    builder.add_edge("start_turn", "router")
     builder.add_edge("router", END)
     for name in _SPECIALIST_NAMES:
         builder.add_edge(name, "after_specialist")
-    # Always back to the router — it reviews every specialist result before
+    # Back to the router so it can review every specialist result before
     # answering (see the module docstring for why this trades one extra LLM
-    # call per delegation for the router always getting a chance to catch a
-    # bad answer).
-    builder.add_edge("after_specialist", "router")
+    # call per delegation for the router usually getting a chance to catch a
+    # bad answer) — but only up to MAX_DELEGATIONS_PER_TURN; past that,
+    # _finalize short-circuits straight to a reply so a turn can never
+    # bounce back and forth unboundedly (see that constant's docstring).
+    builder.add_conditional_edges("after_specialist", _route_after_specialist, ["router", "finalize"])
+    builder.add_edge("finalize", END)
 
-    graph = builder.compile(checkpointer=MemorySaver())
+    graph = builder.compile(checkpointer=checkpointer or MemorySaver())
     return graph, specialists
 
 
 async def build_supervisor_graph():
     """Connects to every MCP server (once — the connections stay open for
     the life of the process, via maks/mcp_client.py's init()) and compiles
-    the runnable supervisor (with an in-memory checkpointer so a session
-    remembers context turn to turn). Used by the real app (maks/pipeline.py).
+    the runnable supervisor, backed by a single persistent AsyncSqliteSaver
+    (see _get_checkpointer()) so both the router's own conversation and
+    every sticky specialist's own thread survive a process restart. Used by
+    the real app (maks/pipeline.py).
     """
     await mcp_client.init()
     tools_by_agent = {
         name: mcp_client.get_tools(name)
         for name in ("supervisor", "chit_chat_agent", "office_agent", "coder_agent", "mac_control_agent")
     }
-    return _assemble_graph(tools_by_agent)
+    checkpointer = await _get_checkpointer()
+    return _assemble_graph(tools_by_agent, checkpointer=checkpointer)
 
 
 async def make_graph(config=None):

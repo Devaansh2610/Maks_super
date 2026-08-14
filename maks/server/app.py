@@ -31,6 +31,11 @@ class SystemPromptRequest(BaseModel):
     content: str
 
 
+class NarrateRequest(BaseModel):
+    agent: str
+    message: str
+
+
 @app.on_event("startup")
 async def _bind_event_loop() -> None:
     bus.bind_loop(asyncio.get_running_loop())
@@ -56,6 +61,27 @@ async def save_system_prompt(req: SystemPromptRequest) -> JSONResponse:
     SYSTEM_PROMPT_PATH.parent.mkdir(parents=True, exist_ok=True)
     SYSTEM_PROMPT_PATH.write_text(req.content, encoding="utf-8")
     bus.publish("system_prompt_updated")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/internal/narrate")
+async def internal_narrate(req: NarrateRequest) -> JSONResponse:
+    """Live-progress bridge for run_claude_code (maks/mcp_servers/
+    api_connectors.py), which runs in a separate OS process and so can't
+    reach this process's event bus/speaker directly. Not a general-purpose
+    endpoint -- only ever called from that one tool, over the loopback
+    address it hardcodes. No auth, same as every other endpoint on this
+    dashboard: it's a single-user LAN app, not something exposed to
+    untrusted networks.
+
+    Reuses announce_delegation exactly like every other in-process
+    "handing off" narration (see maks/agents/_common.py) -- publishes a bus
+    event for the dashboard and speaks the message as a background task,
+    without blocking this request.
+    """
+    from maks.agents._common import announce_delegation
+
+    announce_delegation(req.agent, req.message)
     return JSONResponse({"ok": True})
 
 

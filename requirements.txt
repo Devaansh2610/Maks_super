@@ -27,6 +27,14 @@ langchain-ollama>=0.2.2
 mcp[cli]==1.29.0
 langchain-mcp-adapters==0.3.2
 
+# --- Durable checkpointing (survives process restart) ---
+# Pinned past two chained CVEs (SQLi -> unsafe msgpack deserialize -> RCE)
+# that only matter for a self-hosted-server exposure this app doesn't have,
+# but cost nothing to avoid: CVE-2025-67644 (fixed 3.0.1), CVE-2026-28277
+# (fixed langgraph-checkpoint 4.0.1).
+langgraph-checkpoint-sqlite>=3.0.1
+langgraph-checkpoint>=4.0.1
+
 # --- Web dashboard / server ---
 fastapi>=0.115.6
 uvicorn[standard]>=0.34.0

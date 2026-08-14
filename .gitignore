@@ -10,3 +10,6 @@ mac_companion/*.log
 # langgraph dev's local runtime cache (checkpoints/store pickles) -- not
 # source, machine-specific, regenerated on every run.
 .langgraph_api/
+# Durable conversation memory (AsyncSqliteSaver, maks/graph/supervisor.py) --
+# runtime data, not source.
+maks_memory.sqlite*

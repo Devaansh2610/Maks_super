@@ -9,8 +9,9 @@ from __future__ import annotations
 from langchain_core.tools import BaseTool
 from langgraph.prebuilt import create_react_agent
 
-from maks.agents._common import HANDOFF_INSTRUCTION, dynamic_prompt
+from maks.agents._common import HANDOFF_INSTRUCTION, dynamic_prompt, make_trim_hook
 from maks.llm import get_llm
+from maks.settings import settings
 
 ROLE = (
     "You're the office specialist: web research, email, calendar, "
@@ -38,10 +39,12 @@ ROLE = (
 )
 
 
-def build_office_agent(tools: list[BaseTool]):
+def build_office_agent(tools: list[BaseTool], checkpointer=None):
     return create_react_agent(
         model=get_llm(),
         tools=tools,
         prompt=dynamic_prompt(ROLE),
+        pre_model_hook=make_trim_hook(settings.office_max_context_tokens),
+        checkpointer=checkpointer,
         name="office_agent",
     )

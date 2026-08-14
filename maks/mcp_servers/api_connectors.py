@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as dt
+import json
 import shutil
 import subprocess
 from email.mime.text import MIMEText
@@ -483,50 +484,167 @@ def notion_query_database(database_id: str, max_results: int = 10) -> str:
 
 # ==================================================================== coder ==
 
+# Maps Claude Code's own built-in tool names (as they appear in stream-json
+# tool_use blocks) to a short present-tense phrase, so _narrate can speak
+# something like "Claude is editing api_connectors.py" instead of a bare
+# tool name. Deliberately a plain dict, not a call back to any LLM -- one
+# extra model call per narrated step would defeat the point (speed, staying
+# under Groq's free-tier rate limit) and add a failure mode of its own.
+_TOOL_NARRATIONS = {
+    "Read": lambda i: f"reading {i.get('file_path', 'a file')}",
+    "Edit": lambda i: f"editing {i.get('file_path', 'a file')}",
+    "Write": lambda i: f"writing {i.get('file_path', 'a file')}",
+    "Bash": lambda i: f"running a command: {i.get('command', '')[:60]}",
+    "Grep": lambda i: f"searching the code for {i.get('pattern', '')!r}",
+    "Glob": lambda i: "looking for files",
+    "TodoWrite": lambda i: "updating its task list",
+    "WebFetch": lambda i: f"fetching {i.get('url', 'a page')}",
+    "WebSearch": lambda i: f"searching the web for {i.get('query', '')!r}",
+    "Task": lambda i: "delegating to a sub-agent",
+}
+
+
+def _describe_tool_use(name: str, tool_input: dict) -> str:
+    describe = _TOOL_NARRATIONS.get(name)
+    if describe is not None:
+        try:
+            return f"Claude is {describe(tool_input)}"
+        except Exception:  # noqa: BLE001 -- narration is best-effort, never worth failing the run over
+            pass
+    return f"Claude is using {name}"
+
+
+def _narrate(message: str) -> None:
+    """Best-effort push of one live progress update to the main app's
+    dashboard, which relays it through the event bus and speaks it (see
+    maks/server/app.py's /internal/narrate). This server runs in a separate
+    OS process from the main app (see the module docstring), so it can't
+    reach that process's event bus/speaker directly -- a plain localhost
+    HTTP call is the simplest bridge, reusing the dashboard server that's
+    already running rather than adding a new transport. Silently skipped
+    if the main app isn't up (e.g. this MCP server was started standalone
+    for debugging, or via `langgraph dev`) -- Claude Code still runs to
+    completion either way, it just narrates to nobody.
+    """
+    try:
+        httpx.post(
+            f"http://127.0.0.1:{settings.dashboard_port}/internal/narrate",
+            json={"agent": "claude", "message": message},
+            timeout=2.0,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _run_claude(task: str, project_dir: str) -> str:
+    """Hands `task` to Claude Code headlessly (`-p`/`--print`) with
+    `--output-format stream-json --verbose`, narrating each significant
+    tool use live as it streams by (see _narrate/_describe_tool_use) instead
+    of staying silent until the whole task finishes. Returns Claude's own
+    final result text -- a real summary of what it did, not just a
+    completion marker -- so the coder specialist has something substantive
+    to relay back to the user.
+
+    Deliberately not an interactive terminal (an earlier version of this
+    opened one): narrating live and reading back a real result both need
+    Claude's own structured event stream, which only `--print` mode
+    produces -- an interactive session has nothing to read from without
+    fragile terminal-output scraping. The trade-off: headless mode has no
+    user watching to approve a tool that needs permission, so a task that
+    hits one will hang rather than prompt -- CLAUDE_PERMISSION_MODE
+    (settings.claude_permission_mode) is there for anyone who wants to opt
+    into a specific permission mode (e.g. "acceptEdits") to avoid that;
+    left unset by default rather than silently choosing one, since that's a
+    real trust decision, not a UX one.
+    """
     target_dir = Path(project_dir or settings.claude_default_project_dir).expanduser()
 
     # On Windows, Node-installed CLIs are often `.cmd` shims that
-    # subprocess.run() won't resolve the way cmd.exe's own PATH search does
+    # subprocess.Popen() won't resolve the way cmd.exe's own PATH search does
     # (CreateProcess doesn't try PATHEXT extensions). shutil.which() does the
     # right thing on every platform, so resolve explicitly rather than
     # passing the bare name straight to subprocess.
     resolved_bin = shutil.which(settings.claude_cli_bin) or settings.claude_cli_bin
 
+    command = [resolved_bin, "-p", task, "--output-format", "stream-json", "--verbose"]
+    if settings.claude_permission_mode:
+        command += ["--permission-mode", settings.claude_permission_mode]
+
     try:
-        result = subprocess.run(
-            [resolved_bin, "-p", task, "--output-format", "text"],
+        process = subprocess.Popen(
+            command,
             cwd=str(target_dir) if target_dir.exists() else None,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # Without these two, this subprocess inherits this process's
+            # console on Windows -- Claude Code then detects a real TTY on
+            # stdin and enables interactive terminal features (mouse
+            # tracking) on it despite -p/--print, then blocks waiting for
+            # keyboard input that will never come, on whatever console that
+            # happened to be (observed in testing: it can be an unrelated
+            # ancestor console, not even one this app opened). stdin=DEVNULL
+            # denies it any input stream to treat as a TTY; CREATE_NO_WINDOW
+            # additionally stops it from creating or attaching to a console
+            # at all. Together these make -p mode actually headless.
+            stdin=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
             text=True,
-            timeout=900,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
     except FileNotFoundError:
         return (
             f"Couldn't find the '{settings.claude_cli_bin}' CLI on this machine. "
             "Make sure Claude Code is installed and on PATH."
         )
-    except subprocess.TimeoutExpired:
-        return "Claude Code took too long (over 15 minutes) and was stopped. Try a narrower task."
 
-    if result.returncode != 0:
-        return f"Claude Code exited with an error:\n{result.stderr.strip()[:2000]}"
+    final_text = ""
+    last_narration = None
+    assert process.stdout is not None
+    for line in process.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
-    output = result.stdout.strip()
-    return output[:4000] if output else "Claude Code finished with no output."
+        etype = event.get("type")
+        if etype == "assistant":
+            for block in event.get("message", {}).get("content", []):
+                if block.get("type") == "tool_use":
+                    narration = _describe_tool_use(block.get("name", ""), block.get("input") or {})
+                    if narration != last_narration:
+                        _narrate(narration)
+                        last_narration = narration
+        elif etype == "result":
+            final_text = (event.get("result") or "").strip()
+
+    process.wait()
+
+    if process.returncode != 0:
+        stderr_output = process.stderr.read().strip() if process.stderr else ""
+        return f"Claude Code exited with an error:\n{stderr_output[:2000]}"
+
+    return final_text[:4000] if final_text else "Claude Code finished with no output."
 
 
 @mcp.tool()
 async def run_claude_code(task: str, project_dir: str = "") -> str:
-    """Hand a coding task off to Claude Code (writing, editing, debugging, or
-    explaining code) and return its final output. `project_dir` optionally
-    points Claude at a specific project folder; otherwise the configured
-    default project directory is used.
+    """Hand a coding task off to Claude Code, which works on it headlessly
+    while narrating what it's doing live (each significant action -- editing
+    a file, running a command, searching the code -- gets spoken as it
+    happens via the dashboard). `project_dir` optionally points Claude at a
+    specific project folder; otherwise the configured default project
+    directory is used. Returns Claude's own real summary of what it did once
+    it finishes, not just a completion marker.
 
-    Wrapped in asyncio.to_thread deliberately: this server now shares one
+    Wrapped in asyncio.to_thread deliberately: this server shares one
     process/event loop with every other tool above (web search, Gmail,
-    Notion, ...), so this blocking subprocess call must not block them while
-    Claude Code runs, which can take a while.
+    Notion, ...), so this blocking read-until-done must not block them while
+    Claude Code works, which can take a while.
     """
     return await asyncio.to_thread(_run_claude, task, project_dir)
 
