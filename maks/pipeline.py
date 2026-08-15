@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
+from maks import jobs
 from maks.agents._common import invoke_specialist
 from maks.events import bus
 from maks.graph.router import route
@@ -91,6 +92,11 @@ async def handle_command(text: str) -> str:
     if not text:
         return ""
 
+    # Tells background-job heartbeats to stay quiet for a bit — see
+    # maks/jobs.py's seconds_since_user_activity. Marked on the way *in*, so
+    # a progress update can't land in the gap between the user speaking and
+    # Maks answering.
+    jobs.mark_user_active()
     bus.publish("thinking", text=text)
 
     # Make sure specialists exist before trying the fast path — they're

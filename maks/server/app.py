@@ -51,6 +51,32 @@ async def status() -> JSONResponse:
     return JSONResponse(bus.last_status)
 
 
+@app.get("/jobs")
+async def list_jobs() -> JSONResponse:
+    """Background jobs dispatched this session (see maks/jobs.py) — what's
+    running, what finished, results, and errors. The supervisor reads the
+    same registry through its check_background_jobs tool; this is the
+    dashboard's (and a human debugger's) direct view of it, without going
+    through the model.
+    """
+    from maks import jobs
+
+    return JSONResponse(
+        [
+            {
+                "id": j.id,
+                "agent": j.agent,
+                "task": j.task,
+                "status": j.status,
+                "result": j.result,
+                "error": j.error,
+                "elapsed_seconds": round(j.elapsed_seconds, 1),
+            }
+            for j in jobs.all_jobs()
+        ]
+    )
+
+
 @app.get("/system-prompt")
 async def get_system_prompt() -> JSONResponse:
     return JSONResponse({"content": settings.read_system_prompt()})

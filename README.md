@@ -47,6 +47,59 @@ Jarvis-style dashboard that's dark until it hears you, then lights up.
   of an unbounded review cycle burning through a free-tier rate limit.
 - **Hands-free coding, actually narrated** — Claude Code's own event stream,
   not a scraped terminal.
+- **A supervisor that never blocks** — long work is dispatched as a
+  background job, so you keep talking while it runs.
+
+## Newest: background jobs + a real deep-research agent
+
+Ask for something long and Maks hands it off and **stays free**:
+
+```
+You:  "Do a deep research dive on dog training methods."
+Maks: "I've kicked off background job 1. Anything else I can help with?"   ← instant
+
+You:  "Tell me a short joke."                        ← while research runs
+Maks: "Why don't skeletons fight each other? They don't have the guts."
+
+      [every 30s, only if you've gone quiet]
+Maks: "Job 1, 2 minutes in — 3 sub-agents spawned — currently reading a web page."
+
+      [when it lands]
+Maks: "Job 1 is done, sir. Say the word and I'll go through it."
+```
+
+**What's new and tested:**
+
+- **Background dispatch** (`dispatch_background_task`) — implemented as a
+  *tool that returns a receipt*, not a graph node, so the graph's control
+  flow stays ordinary and the work lives on the persistent event loop where
+  it can outlive the turn. Verified returning in **0.000s** while the job ran.
+- **A job registry** (`maks/jobs.py`) with status, results, errors, timings,
+  live activity and sub-agent counts — exposed at `GET /jobs` and readable
+  by the assistant via `check_background_jobs`.
+- **Progress heartbeats** — a spoken update every 30s, but only after 25s of
+  silence, so it never interrupts an actual conversation. Powered by a
+  LangChain callback handler, which propagates into nested runs and so can
+  report what the *sub-agents* are doing.
+- **A deep research agent** built on LangChain's
+  [`deepagents`](https://docs.langchain.com/oss/python/deepagents/overview)
+  harness — real planning (todo list), a virtual filesystem for offloading
+  findings, and **ephemeral sub-agents with isolated context**. Verified by
+  instrumenting every model request: parent gets 10 tools, each spawned
+  sub-agent gets 9 (the same set minus `task`, since sub-agents can't spawn
+  sub-agents) and genuinely searches and reads pages on its own.
+- **Friendlier failure** — provider errors become plain spoken English
+  ("I hit my usage limit…") with the raw error logged for debugging.
+- **One job at a time** (a semaphore) so background work can't starve the
+  conversation you're actually having.
+
+**Honest limitation:** deep research is token-hungry — a single sweep is 14+
+model calls. Groq's free tier (8k tokens/min, 200k/day) is the real ceiling,
+and a day of testing exhausted it. The feature works; the quota is the
+constraint. Set `DEEP_RESEARCH_MODEL` to a smaller model, or upgrade the
+tier. Background jobs also don't survive a restart — they're in-process
+tasks (see [`architecture.md`](architecture.md) §5 for the durable
+alternative).
 
 ## Architecture, visually
 
@@ -725,3 +778,65 @@ identically — just swap PowerShell commands for their bash equivalents (e.g.
   better part of a minute, which looks exactly like a hang). Past the cap,
   the last specialist's own answer becomes the final reply directly, with
   no extra model call.
+
+---
+
+## Running it
+
+Both commands are for **cmd.exe** (not PowerShell), including venv activation.
+
+### Maks UI — the real app (voice + dashboard)
+
+```
+cd /d C:\Users\devaansh.makhijani\Desktop\Maks_super
+venv\Scripts\activate.bat
+python -m maks.main
+```
+
+- Dashboard: `http://localhost:8420`
+- Background jobs (JSON): `http://localhost:8420/jobs`
+
+This is the only mode where **background jobs, deep research, sticky
+sessions and durable memory actually run**.
+
+### LangGraph Studio — graph inspection and testing
+
+```
+cd /d C:\Users\devaansh.makhijani\Desktop\Maks_super
+venv\Scripts\activate.bat
+set "PYTHONUTF8=1"
+langgraph dev --no-reload --allow-blocking
+```
+
+Keep the quotes in `set "PYTHONUTF8=1"` — without them cmd includes the
+trailing space in the value. `--allow-blocking` is required (some tool calls
+do blocking I/O), and `--no-reload` avoids re-importing the graph on every
+file save.
+
+### Why some agents aren't visible in Studio
+
+Studio renders the compiled graph, so **only things that are real graph
+nodes appear**. Several deliberately aren't:
+
+- **`deep_research_agent` has no node at all.** It's reachable only through
+  `dispatch_background_task` and lives in the `specialists` dict, not the
+  graph — precisely so it can never be run inline and block a turn. It will
+  never show up in Studio, and that's by design, not a bug.
+- **Background jobs don't appear either.** A dispatched job is an asyncio
+  task on `maks/runtime.py`'s persistent loop, *outside* the graph, so it
+  can outlive the turn that started it. The graph run it came from has
+  already hit `END` by the time the job is doing anything. Use
+  `GET /jobs` (or just ask Maks) to see those.
+- **Specialist internals only expand with `xray`.** `chit_chat_agent`,
+  `office_agent`, `coder_agent` and `mac_control_agent` are real nodes and
+  do show, but their inner `pre_model_hook`/`agent`/`tools` loops only
+  appear when subgraphs are expanded.
+- **The Mac companion's tools are missing unless the Mac is running.** If
+  `mac_agent.py` isn't reachable, `mac_control_agent` loads with an empty
+  tool list (you'll see `Couldn't connect to the 'mac' MCP server` in the
+  log) — everything else still works.
+
+Also note Studio bypasses `maks/pipeline.py` entirely, so the **embedding
+fast-path router and sticky threads don't apply there** — every request goes
+through the full LLM router. That's the point for testing routing in
+isolation, but it means Studio behaviour won't match the real app exactly.

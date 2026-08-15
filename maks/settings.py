@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
     groq_temperature: float = 0.3
+    # The deep researcher only (maks/agents/deep_research_agent.py). It runs
+    # in the background, so its latency is nobody's problem, and it drives a
+    # far bigger tool surface than any other agent — planning, a virtual
+    # filesystem, sub-agents, plus the web tools. The 20b model measurably
+    # struggles at that size of tool set (observed: inventing a web_search
+    # signature that didn't match the real one); the 120b sibling handles it
+    # and keeps the same tool-call format.
+    deep_research_model: str = "openai/gpt-oss-120b"
 
     # Ollama — kept only for local embeddings (the fast-path router), no
     # longer used for chat.
@@ -41,6 +49,14 @@ class Settings(BaseSettings):
     # Groq's free-tier ~8000 tok/min ceiling, split across whichever of the
     # router's own call and one specialist call happen in the same turn.
     router_max_context_tokens: int = 3000
+
+    # Background job progress heartbeats (see maks/graph/supervisor.py's
+    # _heartbeat). A deep research sweep runs for minutes; without these
+    # it's indistinguishable from a hang. Only spoken when the user has been
+    # quiet for job_progress_quiet_seconds, so they never interrupt an
+    # actual conversation.
+    job_progress_interval_seconds: float = 30.0
+    job_progress_quiet_seconds: float = 25.0
     chit_chat_max_context_tokens: int = 1500
     office_max_context_tokens: int = 2500
     coder_max_context_tokens: int = 2500
